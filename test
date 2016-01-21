@@ -1,1 +1,30 @@
-test
+#!/usr/bin/perl -w
+use strict;
+
+@ARGV || die $!;
+my ($input,$output)=@ARGV;
+
+open IN,$input;
+open OUT,">$output";
+
+my (@a,$a,%id,$id,$bigtp,%bigtp,$all,%all,$smalltp,$smallfp,%smalltp,%smallfp);
+while (my $tmp=<IN>){
+        chomp $tmp;
+                @a=split /,/,$tmp;
+                $id{$a[0]} = 1;
+                $bigtp{$a[0]}=(split / /,$a[1])[3];
+                $all{$a[0]}=(split / /,$a[3])[3];
+        $tmp=<IN>;chomp $tmp;
+                my @b=split /,/,$tmp;
+                $smalltp{$a[0]}=(split / /,$b[1])[3];
+        $tmp=<IN>;chomp $tmp;
+                my @c=split /,/,$tmp;
+                $smallfp{$a[0]}=(split / /,$c[1])[3];
+}
+
+foreach my $t(keys %id){
+        print OUT "$t\t$all{$t}\t$bigtp{$t}\t$smalltp{$t}\t$smallfp{$t}\n";
+}
+
+close IN;
+close OUT;

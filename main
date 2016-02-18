@@ -1,0 +1,462 @@
+#! /usr/bin/perl -w
+
+use strict;
+use File::Path;
+use File::Basename;
+use Getopt::Long;
+use FindBin qw($RealBin);
+
+my $Bin=$RealBin;
+
+my ($config, $flist, $blist, $uid, $workdir, $ff, $af, $vf, $help);
+GetOptions(
+        "c:s" => \$config,
+        "l:s" => \$flist,
+        "bl:s" => \$blist,
+        "uid" => \$uid,
+        "o:s" => \$workdir,
+        "f" => \$ff,
+        "a" => \$af,
+        "v" => \$vf,
+        "help|?" => \$help,
+);
+if (!defined $config || (!defined $flist && !defined $blist) || (defined $flist && defined $blist) || !defined $workdir || $help){&usage;}
+
+####--- read config file ---####
+require($config);
+our %config;
+$config{'queue'}||="st.q";
+$config{'P'}||="F15ZQSB1SY2307";
+$config{'projectname'}||="test";
+$config{'add_uid'}||="-uid 1 -barcode 7";
+$config{'SOAPnuke'}||="-l 10 -q 0.5 -n 0.1 -Q 2 -G";
+$config{'bwamem'}||="-t 3 -M";
+#$config{'bwaaln'}||="-o 1 -e 20 -m 100000 -t 6 -l 16 -q 10";
+$config{'mpileup2snp'}||="-min-coverage 10 --min-reads2 2 --min-avg-qual 0 --min-var-freq 0.004 --p-value 0.07 --output-vcf 1 --vcf-sample-list";
+$config{'snv_filter'}||="--mindepth 3 --basequal 15 --mapqual 25 --readend 3 --basetest 0.05 --maptest 0.05 --readendtest 0.2 --fishertest 1 --indelregion 20 --indelcount 10 --strandbias 0.00001 --repeatflank 5 --repeatlength 5";
+$config{'mpileup2indel'}||="-min-coverage 10 --min-reads2 1 --min-avg-qual 0 --min-var-freq 0.002 --p-value 0.99 --output-vcf 1 --vcf-sample-list";
+$config{'indel_filter'}||="--mindepth 1 --basequal 20 --mapqual 25 --readend 3 --basetest 0.05 --maptest 0.05 --readendtest 0.25 --fishertest 1 --indelregion 20 --indelcount 10 --strandbias 0.00001 --repeatflank 5 --repeatlength 5";
+$config{'UIDdup'}||="false";
+$config{'target_bed'}||="/ifs5/ST_CANCER_TC/USER/chenly/Zebra_lung/database/bed/SZLungPanelV2.bed";
+$config{'run_bed'}||="/ifs5/ST_CANCER_TC/USER/chenly/Zebra_lung/database/bed/SZLungPanelV2.call.bed";
+
+my $ref_fa = "$Bin/database/reference/hg19/hg19.fa";
+my $gatk_data = "$Bin/database/hg19";
+my $annodir = "$Bin/database/annovar";
+my $picard = "$Bin/bin/picard";
+
+
+$workdir = &convert_to_absolute_path($workdir);
+mkpath "$workdir";
+
+##########
+open SHELL,">$workdir/config.list" or die $!;
+##########input file
+situation_fq($flist) if(defined $flist);
+situation_bam($blist) if(defined $blist);
+close SHELL;
+
+open RUN,">$workdir/run.sh" or die $!;
+print RUN "$Bin/monitor taskmonitor -i $workdir/config.list -q $config{'queue'} -P $config{'P'} -p $config{'projectname'}\n";
+close RUN;
+open RUN,">$workdir/run.standby.sh" or die $!;
+print RUN "export LD_LIBRARY_PATH=\$LD_LIBRARY_PATH:/opt/blc/python-2.6.5/lib\n";
+print RUN "export PYTHONPATH=\$PYTHONPATH:$Bin/lib/site-packages\n";
+print RUN "$Bin/task_monitor.py -i $workdir/config.list -q $config{'queue'} -P $config{'P'} -o $workdir/run.standby.sh -n 500\n";
+close RUN;
+print "Please run the project:\tsh $workdir/run.sh\nOr:\tnohup sh $workdir/run.standby.sh >$workdir/run.standby.sh.nohup \&\n";
+##########
+############################################################################################
+#                                       SUB PROCESS                                        #
+############################################################################################
+sub situation_fq{
+        my $fqlist=shift;
+        open FQ,$fqlist or die $!;
+        my (%hash_sample,%hash_shell);
+        while (<FQ>){
+                chomp;
+                my ($sample_name,$lib_name,$id_name,$fq)=(split /\s+/,$_)[0,1,2,3];
+                my $clean_dir = "$workdir/01.Clean/$sample_name/$id_name";
+                my $fstat = "$workdir/01.Clean/$sample_name/$id_name/$id_name.filter.stat";
+                my $clean_sh;
+                $hash_sample{$sample_name}{'f'}=1; ##20160114
+
+                if(defined $ff)
+                {
+        ##filter fq file
+                    $clean_sh=&filter($sample_name,$fq,$lib_name,$id_name,$workdir);
+                }
+
+                if(defined $af)
+                {
+        ##bwa alignment
+                    my ($sort_bam,$bwa_sh)=(split /\s+/,&align($sample_name,$clean_dir,$lib_name,$id_name,$workdir,))[0,1];
+                    $hash_sample{$sample_name}{'bam'}.="$sort_bam ";
+                    $hash_sample{$sample_name}{'stat'}.="$fstat ";
+        ##qsub shell file
+                    if(defined $ff)
+                    {
+                        $hash_shell{$sample_name}{$id_name}="$clean_sh:1G  $bwa_sh:11G\n"; ##20160114 9G->11G
+                    }
+                    else
+                    {
+                        $hash_shell{$sample_name}{$id_name}="$bwa_sh:11G"; ##20160114 9G->11G
+                    }
+                }
+        }
+        close FQ;
+
+        for my $sample_name (keys %hash_sample){
+                my $brecal_bam = "$workdir/05.Brecal/$sample_name/$sample_name.brecal.bam";
+                my $brecal_sh;
+
+                if(defined $af)
+                {
+        ##lib number
+                    my $id_num=keys %{$hash_shell{$sample_name}};
+        ##merge bam file
+                    my ($merge_bam,$merge_sh)=(split /\s+/,&merge($sample_name,$hash_sample{$sample_name}{'bam'},$hash_sample{$sample_name}{'stat'},$workdir,$id_num))[0,1];
+        ##push merage shell to shell list
+                    for my $id_name (keys %{$hash_shell{$sample_name}}){
+                        my $align_sh;
+                        if(defined $ff)
+                        {
+                            print SHELL "$hash_shell{$sample_name}{$id_name}";
+                            $align_sh=(split /\s+/,(split /\n/,$hash_shell{$sample_name}{$id_name})[-1])[-1];
+                        }
+                        else
+                        {
+                            $align_sh=$hash_shell{$sample_name}{$id_name};
+                        }
+                        print SHELL "$align_sh  $merge_sh:5G\n";
+                    }
+        ##gatk realign
+                    my ($realign_bam,$realign_sh)=(split /\s+/,&realign($sample_name,$merge_bam,$workdir))[0,1];
+                    print SHELL "$merge_sh:5G  $realign_sh:5G\n";
+        ##gatk brecal
+                    $brecal_sh=&brecal($sample_name,$realign_bam,$workdir);
+                    print SHELL "$realign_sh:5G  $brecal_sh:5G\n";
+        ##QC:coverage && depth
+                    my $covdep_sh=&covdep($sample_name,$brecal_bam,$workdir);
+                    print SHELL "$brecal_sh:5G  $covdep_sh:4G\n";
+                }
+
+                if(defined $vf)
+                {
+        ##variation
+                    my $snp_sh=&snp($sample_name,$brecal_bam,$workdir);
+                    if(defined $af)
+                    {
+                        print SHELL "$brecal_sh:5G $snp_sh:4G\n";
+                    }
+                    else
+                    {
+                        print SHELL "$snp_sh:4G\n";
+                    }
+
+                    my $indel_sh=&indel($sample_name,$brecal_bam,$workdir);
+                    if(defined $af)
+                    {
+                        print SHELL "$brecal_sh:5G $indel_sh:4G\n";
+                    }
+                    else
+                    {
+                        print SHELL "$indel_sh:4G\n";
+                    }
+                }
+        }
+}
+
+sub situation_bam{
+        my $bamlist=shift;
+        open BAM,$bamlist or die $!;
+        while (<BAM>)
+        {
+            chomp;
+            my ($sample_name,$brecal_bam)=(split /\s+/,$_)[0,1];
+            if(defined $vf)
+            {
+                my $snp_sh=&snp($sample_name,$brecal_bam,$workdir);
+                print SHELL "$snp_sh:4G\n";
+
+                my $indel_sh=&indel($sample_name,$brecal_bam,$workdir);
+                print SHELL "$indel_sh:4G\n";
+            }
+        }
+}
+
+sub usage{
+print "
+Name:
+        Zebra_lung
+
+Description:
+                filter -> align -> variation
+
+Author:
+        Shaolibin (shaolibin\@genomics.cn), Chenlongyun (chenlongyun\@genomics.cn)
+
+Version:
+        Version:1.0
+
+Usage:
+        Zebra_lung
+                -c      the config file in hash format
+                -l      the fastq list:
+                        Column 1:       'sample name'
+                        Column 2:       'library'
+                        Column 3:       'ID'
+                        Column 4:       'fastq', e.g., sample_1.fq.gz;sample_2.fq.gz
+                -bl     the bamfile list:
+                        Column 1:       'sample name'
+                        Column 2:       'bamfile path'
+                -uid    set this parameter ON if you need to add uid into readID, default OFF
+                -o      the output dir
+                -f      do the fq filter
+                -a      do the alignment
+                -v      do the variation
+                -help:
+Example:
+        Zebra_lung -c Zebra_lung_config.pl -l fq.list -o outdir -f -a -v
+        Zebra_lung -c Zebra_lung_config.pl -bl bam.list -o outdir -v
+\n";
+        exit(0);
+}
+
+
+
+####--- functions ---####
+
+sub convert_to_absolute_path
+{
+        my ($path) =@_;
+        my $pwd =`pwd`;
+        my $new_path;
+        $pwd =~s/[\r\n]+$//;
+        if( $path !~/^\// )
+        {
+                $new_path =$pwd."/".$path;
+        }
+        else
+        {
+                $new_path =$path;
+        }
+        if($new_path =~/^\/(.*)\/$/)
+        {
+                $new_path ="/".$1;
+        }
+        return $new_path;
+}
+
+sub generateShell
+{
+        my ($output_shell, $content) = @_;
+        unlink glob "$output_shell.*";
+        open OUT,">$output_shell" or die "Cannot open file $output_shell:$!";
+        print OUT "#!/bin/bash\n";
+        print OUT "echo ==========start at : `date` ========== && \\\n";
+        print OUT "$content && \\\n";
+        print OUT "echo ==========end at : `date` ========== && \\\n";
+        print OUT "echo Still_waters_run_deep 1>&2 && \\\n";
+        print OUT "echo Still_waters_run_deep > $output_shell.sign\n";
+        close OUT;
+}
+
+sub filter{
+        my ($sample,$fqs,$lib,$id,$dir)=@_;
+        my ($fq1,$fq2)=(split /;/,$fqs)[0,1];
+        my $clean="$dir/01.Clean/$sample/$id";
+        mkpath "$clean";
+        my $shell = "$clean/clean.$id.sh";
+        `rm -f $clean/clean.$id.sh*` if(-e "$shell");
+
+        my $content;
+        if(defined $uid)
+        {
+            $content = "perl $Bin/bin/add_uid.pl -fq1 $fq1 -fq2 $fq2 $config{'add_uid'} -o1 $clean/$id\_1.uid.fq.gz -o2 $clean/$id\_2.uid.fq.gz && \\\n";
+            $content .= "$Bin/bin/SOAPnuke filter -1 $clean/$id\_1.uid.fq.gz -2 $clean/$id\_2.uid.fq.gz $config{'SOAPnuke'} -o $clean -C $id\_1.clean.fq.gz -D $id\_2.clean.fq.gz && \\\n";
+        }
+        else
+        {
+            $content = "$Bin/bin/SOAPnuke filter -1 $fq1 -2 $fq2 $config{'SOAPnuke'} -o $clean -C $id\_1.clean.fq.gz -D $id\_2.clean.fq.gz && \\\n";
+        }
+        $content .= "$Bin/bin/Rscript $Bin/bin/base.R $clean/Base_distributions_by_read_position_1.txt $clean/Base_distributions_by_read_position_2.txt $clean/$id\_raw_base.png $clean/$id\_clean_base.png && \\\n";
+  $content .= "$Bin/bin/Rscript $Bin/bin/Q20Q30.R $clean/Distribution_of_Q20_Q30_bases_by_read_position_1.txt $clean/Distribution_of_Q20_Q30_bases_by_read_position_2.txt $clean/$id\_Q20Q30.png && \\\n";
+        $content .= "$Bin/bin/Rscript $Bin/bin/quality.R $clean/Base_quality_value_distribution_by_read_position_1.txt $clean/Base_quality_value_distribution_by_read_position_2.txt $clean/$id\_raw_base_quality.png $clean/$id\_clean_base_quality.png 0 0 && \\\n";
+        $content .= "rm -f $clean/$id\_1.uid.fq.gz $clean/$id\_2.uid.fq.gz && \\\n" if(defined $uid);
+        $content .= "perl $Bin/bin/soapnuke_stat.pl $clean/Basic_Statistics_of_Sequencing_Quality.txt $clean/Statistics_of_Filtered_Reads.txt >$clean/$id.filter.stat";
+        &generateShell($shell,$content);
+        return $shell;
+}
+
+sub align{
+        my ($sample,$fqdir,$lib,$id,$dir)=@_;
+        my $workdir="$dir/02.Align";
+        my $align="$dir/02.Align/$sample/$id";
+        mkpath "$align/tmp";
+        mkpath "$align/java_tmp";
+        my $shell = "$align/bwa.$id.sh";
+        `rm -f $align/bwa.$id.sh*` if(-e "$shell");
+
+        my $content = "$Bin/bin/bwa mem $config{'bwamem'} -R \"\@RG\\tID:$id\\tSM:$sample\\tLB:$lib\\tPU:$id\\tPL:COMPLETE\\tCN:BGI\" $ref_fa $fqdir/$id\_1.clean.fq.gz $fqdir/$id\_2.clean.fq.gz|$Bin/bin/samtools view -S -b -F 256 - >$align/$id.bam && \\\n"; ##20160104 PL:Zebra->PL:COMPLETE
+        $content .= "$Bin/bin/java -Xmx4g -Djava.io.tmpdir=$align/java_tmp -XX:MaxPermSize=512m -XX:-UseGCOverheadLimit -jar $picard/SortSam.jar INPUT=$align/$id.bam OUTPUT= $align/$id.sort.bam TMP_DIR=$align/tmp SORT_ORDER=coordinate VALIDATION_STRINGENCY=SILENT && \\\n";
+        $content .= "$Bin/bin/samtools index $align/$id.sort.bam && \\\n";
+        $content .= "if [ -s $align/$id.sort.bam ];then rm -f $align/$id.bam;else echo filter files not exists;exit 1;fi";
+        &generateShell($shell,$content);
+        my $info="$align/$id.sort.bam\t$shell";
+        return $info;
+}
+=pod
+sub align2{
+        my ($sample,$fqdir,$lib,$id,$dir)=@_;
+        my $workdir="$dir/02.Align";
+        my $align="$dir/02.Align/$sample/$id";
+        mkpath "$align/tmp";
+        mkpath "$align/java_tmp";
+        my $shell1 = "$align/bwa.$id.1.sh";
+        my $shell2 = "$align/bwa.$id.2.sh";
+        my $shell3 = "$align/bwa.$id.sh";
+        my $content = "$Bin/bin/bwa aln $config{'bwaaln'} -f $align/$id.1.sai $ref_fa $fqdir/$id\_1.clean.fq.gz";
+        &generateShell($shell1,$content);
+        $content = "$Bin/bin/bwa aln $config{'bwaaln'} -f $align/$id.2.sai $ref_fa $fqdir/$id\_2.clean.fq.gz";
+        &generateShell($shell2,$content);
+        $content = "$Bin/bin/bwa sampe -r \"\@RG\\tID:$id\\tSM:$sample\\tLB:$lib\\tPU:$id\\tPL:COMPLETE\\tCN:BGI\" $ref_fa $align/$id.1.sai $align/$id.2.sai $fqdir/$id\_1.clean.fq.gz $fqdir/$id\_2.clean.fq.gz|$Bin/bin/samtools view -S -b - >$align/$id.bam\n";
+        $content .= "$Bin/bin/java -Xmx4g -Djava.io.tmpdir=$align/java_tmp -XX:MaxPermSize=512m -XX:-UseGCOverheadLimit -jar $picard/SortSam.jar INPUT=$align/$id.bam OUTPUT= $align/$id.sort.bam TMP_DIR=$align/tmp SORT_ORDER=coordinate VALIDATION_STRINGENCY=SILENT\n";
+        $content .= "$Bin/bin/samtools index $align/$id.sort.bam\n";
+        $content .= "if [ -s $align/$id.sort.bam ];then\n\trm -f $align/$id.1.sai $align/$id.2.sai $align/$id.bam\nelse\n\techo filter files not exists\nexit 1\nfi";
+        &generateShell($shell3,$content);
+        my $info="$align/$id.sort.bam\t$shell1\t$shell2\t$shell3";
+        return $info;
+}
+=cut
+
+sub merge{
+        my ($sample,$alignbam,$stat,$dir,$num)=@_;
+        my $wdir="$dir/03.Merge/$sample";
+        mkpath "$wdir/java_tmp";
+        mkpath "$wdir/tmp";
+        mkpath "$dir/06.Covdep/$sample/All"; ##20160104
+        my @bam=split /\s+/,$alignbam;
+        my ($bamfile,$rmbam);
+        for my $bam (@bam){
+                $bamfile.="I=$bam ";
+                $rmbam.="$bam ";
+        }
+        my $shell = "$wdir/merge.$sample.sh";
+        `rm -f $wdir/merge.$sample.sh*` if(-e "$shell");
+
+        my $content = "ls $stat >$wdir/list && perl $Bin/bin/catRS.pl $wdir/list $wdir/$sample.xls $sample && \\\n";
+        if($num==1){
+            $content .= "ln -s $alignbam $wdir/$sample.merge.bam && \\\n";
+        }else{
+            $content .= "$Bin/bin/java -Xmx4g -Djava.io.tmpdir=$wdir/java_tmp -XX:MaxPermSize=512m -XX:-UseGCOverheadLimit -jar $picard/MergeSamFiles.jar $bamfile O=$wdir/$sample.merge.bam TMP_DIR=$wdir/tmp SO=coordinate AS=true VALIDATION_STRINGENCY=SILENT && \\\n";
+        }
+        if($config{'UIDdup'} eq 'false')
+        {
+            $content .= "$Bin/bin/java -Xmx4g -Djava.io.tmpdir=$wdir/java_tmp -XX:MaxPermSize=512m -XX:-UseGCOverheadLimit -jar $picard/MarkDuplicates.jar MAX_FILE_HANDLES=1000 REMOVE_DUPLICATES=false I=$wdir/$sample.merge.bam O=$wdir/$sample.rmd.bam METRICS_FILE=$wdir/$sample.rmd.bam.met TMP_DIR=$wdir/tmp VALIDATION_STRINGENCY=SILENT && \\\n";
+        }
+        else
+        {
+            mkpath "$wdir/bdup_covdep";
+            $content .= "perl $Bin/bin/rm_dup_with_uid_PE.pl $wdir/$sample.merge.bam $wdir/$sample.rmd.bam && \\\n";
+            $content .= "$Bin/bin/samtools index $wdir/$sample.merge.bam && \\\n";
+            $content .= "$Bin/bin/bamdst -p $config{'target_bed'} -o $wdir/bdup_covdep $wdir/$sample.merge.bam && \\\n";
+        }
+        $content .= "$Bin/bin/samtools index $wdir/$sample.rmd.bam && \\\n";
+        $content .= "$Bin/bin/bamdst -p $config{'target_bed'} -o $dir/06.Covdep/$sample/All $wdir/$sample.rmd.bam && \\\n"; ##20160104
+        $content .= "if [ -s $wdir/$sample.rmd.bam ];then rm -f $rmbam $wdir/$sample.merge.bam;else echo BWA files not exists;exit 1;fi";
+        &generateShell($shell,$content);
+        my $info="$wdir/$sample.rmd.bam\t$shell";
+        return $info;
+}
+sub realign{
+        my ($sample,$bam,$dir)=@_;
+        my $wdir="$dir/04.Realign/$sample";
+        mkpath "$wdir/java_tmp";
+        my $shell = "$wdir/realign.$sample.sh";
+        `rm -f $wdir/realign.$sample.sh*` if(-e "$shell");
+
+        my $content = "$Bin/bin/java -Xmx4g -Djava.io.tmpdir=$wdir/java_tmp -XX:MaxPermSize=512m -XX:-UseGCOverheadLimit -jar $Bin/bin/GATK3/GenomeAnalysisTK.jar -T RealignerTargetCreator -l INFO -I $bam -R $ref_fa -o $wdir/$sample.realign.intervals -known $gatk_data/dbsnp_137.hg19.vcf.gz -known $gatk_data/1000G_phase1.indels.hg19.vcf.gz -known $gatk_data/Mills_and_1000G_gold_standard.indels.hg19.vcf.gz -L $config{'run_bed'} && \\\n"; ##20160104 target_bed->run_bed
+        $content .= "$Bin/bin/java -Xmx4g -Djava.io.tmpdir=$wdir/java_tmp -XX:MaxPermSize=512m -XX:-UseGCOverheadLimit -jar $Bin/bin/GATK3/GenomeAnalysisTK.jar -T IndelRealigner -l INFO -I $bam -R $ref_fa -o $wdir/$sample.realign.bam -targetIntervals $wdir/$sample.realign.intervals -known $gatk_data/dbsnp_137.hg19.vcf.gz -known $gatk_data/1000G_phase1.indels.hg19.vcf.gz -known $gatk_data/Mills_and_1000G_gold_standard.indels.hg19.vcf.gz -L $config{'run_bed'} && \\\n"; ##20160104 target_bed->run_bed
+        $content .= "$Bin/bin/samtools index $wdir/$sample.realign.bam && \\\n";
+        $content .= "if [ -s $wdir/$sample.realign.bam ];then echo DONE;else echo Merge files not exists;exit 1;fi"; ##20160114 remove 'rm -f $dir/03.Merge/$sample/*.bam $dir/03.Merge/$sample/*.bai'
+        &generateShell($shell,$content);
+        my $info="$wdir/$sample.realign.bam\t$shell";
+        return $info;
+}
+
+sub brecal{
+        my ($sample,$bam,$dir)=@_;
+        my $wdir="$dir/05.Brecal/$sample";
+        mkpath "$wdir/java_tmp";
+        my $shell = "$wdir/brecal.$sample.sh";
+        `rm -f $wdir/brecal.$sample.sh*` if(-e "$shell");
+
+
+        my $content = "$Bin/bin/java -Xmx4g -Djava.io.tmpdir=$wdir/java_tmp -XX:MaxPermSize=512m -XX:-UseGCOverheadLimit -jar $Bi
+n/bin/GATK3/GenomeAnalysisTK.jar -T BaseRecalibrator -l INFO -I $bam -R $ref_fa -knownSites $gatk_data/dbsnp_137.hg19.vcf.gz -knownSites $gatk_data/1000G_phase1.indels.hg19.vcf.gz -knownSites $gatk_data/Mills_and_1000G_gold_standard.indels.hg19.vcf.gz -o $wdir/$sample.brecal.grp -nct 4 -L $config{'run_bed'} && \\\n"; ##20160104 target_bed->run_bed
+        $content .= "$Bin/bin/java -Xmx4g -Djava.io.tmpdir=$wdir/java_tmp -XX:MaxPermSize=512m -XX:-UseGCOverheadLimit -jar $Bin/bin/GATK3/GenomeAnalysisTK.jar -T PrintReads -l INFO -I $bam -R $ref_fa -BQSR $wdir/$sample.brecal.grp -o $wdir/$sample.brecal.bam  -L $config{'run_bed'} && \\\n"; ##20160104 target_bed->run_bed
+        $content .= "$Bin/bin/samtools index $wdir/$sample.brecal.bam && \\\n";
+        $content .= "if [ -s $wdir/$sample.brecal.bam ];then rm -f $dir/04.Realign/$sample/*.bam $dir/04.Realign/$sample/*.bai $wdir/$sample.brecal.grp;else echo Realign files not exists;exit 1;fi";
+        &generateShell($shell,$content);
+        return $shell;
+}
+
+sub covdep{
+        my ($sample,$bam,$dir)=@_;
+        my $wdir="$dir/06.Covdep/$sample/Target"; ##20160104 Target
+        mkpath "$wdir";
+        my $shell = "$wdir/covdep.$sample.sh";
+        `rm -f $wdir/covdep.$sample.sh*` if(-e "$shell");
+
+        my $content = "$Bin/bin/bamdst -p $config{'target_bed'} -o $wdir $bam && \\\n";
+#       $content .= "perl $Bin/bin/drawInsetsize.pl $bam $wdir\n"; ##20160120 rm
+        $content .= "$Bin/bin/Rscript $Bin/bin/depth.R $wdir/depth_distribution.plot $wdir/hisplot.png $wdir/cumuplot.png && \\\n"; ##20160120 draw target depth distribution
+        $content .= "perl $Bin/bin/E/AmpliconCoverageDepth.pl $bam $config{'target_bed'} $wdir/$sample.exon.depthsingle.txt && \\\n";
+        $content .= "perl $Bin/bin/E/RegionCoverage.pl $wdir/$sample.exon.depthsingle.txt $config{'target_bed'} 0-50000 $wdir/$sample.exon && \\\n";
+        $content .= "perl $Bin/bin/E/svg_point_line_rect.pl -rec -infile $wdir/$sample.exon.depth.txt -outfile $wdir/$sample";
+        &generateShell($shell,$content);
+        return $shell;
+}
+
+sub snp{
+        my ($sample,$bam,$dir)=@_;
+        my $snp_dir="$dir/07.variation/$sample/snp";
+        mkpath "$snp_dir";
+        my $shell = "$snp_dir/snp.$sample.sh";
+        `rm -f $snp_dir/snp.$sample.sh*` if(-e "$shell");
+
+        my $content = "export PERL5LIB=\"$Bin/lib:\$PERL5LIB\" && \\\n";
+        $content .= "export PATH=\$PATH:$annodir && \\\n";
+        $content .= "$Bin/bin/samtools mpileup -Q 0 -l $config{'run_bed'} -f $ref_fa $bam |$Bin/bin/java -Xmx3G -jar $Bin/bin/VarScan.v2.3.9.jar mpileup2snp - $config{'mpileup2snp'} |perl $Bin/bin/filter.snp.fre.pl - $Bin/database/lung.snp.xls >$snp_dir/$sample.snp.vcf && \\\n";
+        $content .= "perl $Bin/bin/snv_filter.pl -i $snp_dir/$sample.snp.vcf --type vcf -s $bam $config{'snv_filter'} --fafile $ref_fa --repeatfile $Bin/database/Repeat_hg19.bed.gz -o $snp_dir/$sample.snp.strict && \\\n";
+        $content .= "perl $Bin/bin/Filter_snp.pl $snp_dir/$sample.snp.strict.filtered $snp_dir && \\\n";
+        $content .= "perl $Bin/bin/Filter_snv.pl $snp_dir/$sample.snv.vcf $snp_dir && \\\n"; ##20160111
+        $content .= "perl $annodir/convert2annovar.pl -format vcf4 --includeinfo $snp_dir/$sample.somaticsnv.vcf >$snp_dir/$sample.snv.annovar && \\\n"; ##20160107 snv.vcf->somaticsnv.vcf
+        $content .= "perl $annodir/summarize_annovar.pl --buildver hg19 --verdbsnp 137 $snp_dir/$sample.snv.annovar $annodir && \\\n";
+        $content .= "perl $Bin/bin/csv2report.pl $snp_dir/$sample.snv.annovar.exome_summary.csv $snp_dir && \\\n";
+        $content .= "rm -f $snp_dir/$sample.snv.annovar.*ed";
+        &generateShell($shell,$content);
+        return $shell;
+}
+
+sub indel{
+        my ($sample,$bam,$dir)=@_;
+        my $indel_dir="$dir/07.variation/$sample/indel";
+        mkpath "$indel_dir";
+        my $shell = "$indel_dir/indel.$sample.sh";
+        `rm -f $indel_dir/indel.$sample.sh*` if(-e "$shell");
+
+        my $content = "export PERL5LIB=\"$Bin/lib:\$PERL5LIB\" && \\\n";
+        $content .= "export PATH=\$PATH:$annodir && \\\n";
+        $content .= "$Bin/bin/samtools mpileup -Q 0 -l $config{'run_bed'} -f $ref_fa $bam |$Bin/bin/java -Xmx3G -jar $Bin/bin/VarScan.v2.3.9.jar mpileup2indel - $config{'mpileup2indel'} |perl $Bin/bin/filter.indel.fre.pl - $Bin/database/lung.indel.xls >$indel_dir/$sample.indel.vcf && \\\n";
+        $content .= "perl $Bin/bin/InDel_filter.pl --type vcf $config{'indel_filter'} --fafile $ref_fa --repeatfile $Bin/database/Repeat_hg19.bed.gz -i $indel_dir/$sample.indel.vcf -s $bam -o $indel_dir/$sample.indel.strict && \\\n";
+        $content .= "perl $Bin/bin/Filter_indel.pl $indel_dir/$sample.indel.strict.filtered $indel_dir && \\\n";
+        $content .= "perl $Bin/bin/Filter_sindel.pl $indel_dir/$sample.sindel.vcf $indel_dir && \\\n"; ##20160111
+        $content .= "perl $annodir/convert2annovar.pl -format vcf4 --includeinfo $indel_dir/$sample.somaticindel.vcf >$indel_dir/$sample.sindel.annovar && \\\n"; ##20160107 sindel.vcf->somaticindel.vcf
+        $content .= "perl $annodir/summarize_annovar.pl --buildver hg19 --verdbsnp 137 $indel_dir/$sample.sindel.annovar $annodir && \\\n";
+        $content .= "perl $Bin/bin/csv2report.pl $indel_dir/$sample.sindel.annovar.exome_summary.csv $indel_dir && \\\n";
+        $content .= "rm -f $indel_dir/$sample.sindel.annovar.*ed";
+        &generateShell($shell,$content);
+        return $shell;
+}

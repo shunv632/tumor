@@ -306,6 +306,7 @@ sub align{
         my $info="$align/$id.sort.bam\t$shell";
         return $info;
 }
+
 =pod
 sub align2{
         my ($sample,$fqdir,$lib,$id,$dir)=@_;
@@ -369,6 +370,7 @@ sub merge{
         my $info="$wdir/$sample.rmd.bam\t$shell";
         return $info;
 }
+
 sub realign{
         my ($sample,$bam,$dir)=@_;
         my $wdir="$dir/04.Realign/$sample";
@@ -391,8 +393,6 @@ sub brecal{
         mkpath "$wdir/java_tmp";
         my $shell = "$wdir/brecal.$sample.sh";
         `rm -f $wdir/brecal.$sample.sh*` if(-e "$shell");
-
-
         my $content = "$Bin/bin/java -Xmx4g -Djava.io.tmpdir=$wdir/java_tmp -XX:MaxPermSize=512m -XX:-UseGCOverheadLimit -jar $Bi
 n/bin/GATK3/GenomeAnalysisTK.jar -T BaseRecalibrator -l INFO -I $bam -R $ref_fa -knownSites $gatk_data/dbsnp_137.hg19.vcf.gz -knownSites $gatk_data/1000G_phase1.indels.hg19.vcf.gz -knownSites $gatk_data/Mills_and_1000G_gold_standard.indels.hg19.vcf.gz -o $wdir/$sample.brecal.grp -nct 4 -L $config{'run_bed'} && \\\n"; ##20160104 target_bed->run_bed
         $content .= "$Bin/bin/java -Xmx4g -Djava.io.tmpdir=$wdir/java_tmp -XX:MaxPermSize=512m -XX:-UseGCOverheadLimit -jar $Bin/bin/GATK3/GenomeAnalysisTK.jar -T PrintReads -l INFO -I $bam -R $ref_fa -BQSR $wdir/$sample.brecal.grp -o $wdir/$sample.brecal.bam  -L $config{'run_bed'} && \\\n"; ##20160104 target_bed->run_bed
@@ -408,7 +408,6 @@ sub covdep{
         mkpath "$wdir";
         my $shell = "$wdir/covdep.$sample.sh";
         `rm -f $wdir/covdep.$sample.sh*` if(-e "$shell");
-
         my $content = "$Bin/bin/bamdst -p $config{'target_bed'} -o $wdir $bam && \\\n";
 #       $content .= "perl $Bin/bin/drawInsetsize.pl $bam $wdir\n"; ##20160120 rm
         $content .= "$Bin/bin/Rscript $Bin/bin/depth.R $wdir/depth_distribution.plot $wdir/hisplot.png $wdir/cumuplot.png && \\\n"; ##20160120 draw target depth distribution

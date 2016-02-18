@@ -26,9 +26,9 @@ if (!defined $config || (!defined $flist && !defined $blist) || (defined $flist 
 require($config);
 our %config;
 $config{'queue'}||="st.q";
-$config{'P'}||="F15ZQSB1SY2307";
+$config{'P'}||="";
 $config{'projectname'}||="test";
-$config{'add_uid'}||="-uid 1 -barcode 7";
+$config{'add_uid'}||="-uid * -barcode * ";
 $config{'SOAPnuke'}||="-l 10 -q 0.5 -n 0.1 -Q 2 -G";
 $config{'bwamem'}||="-t 3 -M";
 #$config{'bwaaln'}||="-o 1 -e 20 -m 100000 -t 6 -l 16 -q 10";
@@ -37,8 +37,8 @@ $config{'snv_filter'}||="--mindepth 3 --basequal 15 --mapqual 25 --readend 3 --b
 $config{'mpileup2indel'}||="-min-coverage 10 --min-reads2 1 --min-avg-qual 0 --min-var-freq 0.002 --p-value 0.99 --output-vcf 1 --vcf-sample-list";
 $config{'indel_filter'}||="--mindepth 1 --basequal 20 --mapqual 25 --readend 3 --basetest 0.05 --maptest 0.05 --readendtest 0.25 --fishertest 1 --indelregion 20 --indelcount 10 --strandbias 0.00001 --repeatflank 5 --repeatlength 5";
 $config{'UIDdup'}||="false";
-$config{'target_bed'}||="/ifs5/ST_CANCER_TC/USER/chenly/Zebra_lung/database/bed/SZLungPanelV2.bed";
-$config{'run_bed'}||="/ifs5/ST_CANCER_TC/USER/chenly/Zebra_lung/database/bed/SZLungPanelV2.call.bed";
+$config{'target_bed'}||="*.bed";
+$config{'run_bed'}||="*.bed";
 
 my $ref_fa = "$Bin/database/reference/hg19/hg19.fa";
 my $gatk_data = "$Bin/database/hg19";

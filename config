@@ -1,0 +1,17 @@
+#!/usr/bin/perl
+%config = (
+        "queue"                   => "st.q",
+        "P"                       => "*",
+        "projectname"             => "test",
+        "add_uid"                 => "-uid 1 -barcode 7",
+                "SOAPnuke"                => "-l 10 -q 0.5 -n 0.1 -Q 2 -G",
+                "bwamem"                  => "-t 8 -M",
+        "bwaaln"                  => "-o 1 -m 100000 -t 6 -q 10",
+        "UIDdup"                  => "false",   #true/false
+        "mpileup2snp"             => "-min-coverage 10 --min-reads2 2 --min-avg-qual 5 --min-var-freq 0.004 --p-value 0.99 --strand-filter 0 --output-vcf 1 --vcf-sample-list",
+                "snv_filter"              => "--mindepth 2 --basequal 12 --mapqual 25 --readend 3 --basetest 0.06 --maptest 0.05 --readendtest 0.25 --fishertest 1 --indelregion 20 --indelcount 10 --strandbias 1e-10 --repeatflank 5 --repeatlength 5",
+                "mpileup2indel"           => "-min-coverage 10 --min-reads2 1 --min-avg-qual 5 --min-var-freq 0.002 --p-value 0.99 --strand-filter 0 --output-vcf 1 --vcf-sample-list",
+                "indel_filter"            => "--mindepth 1 --basequal 12 --mapqual 25 --readend 3 --basetest 0.06 --maptest 0.05 --readendtest 0.25 --fishertest 1 --indelregion 20 --indelcount 30 --strandbias 1e-20 --repeatflank 5 --repeatlength 5",
+                "target_bed"              => "*.bed",
+                "run_bed"                         => "*.bed",
+);
